@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <semaphore.h>
 #include <unistd.h>
+#include <time.h>
+#include <unistd.h>
 
 //enum miner_type {IRON = 0, COPPER = 1, COAL = 2};
 
@@ -34,11 +36,14 @@ typedef struct smelter
     int ore_type;
 }smelter;
 
-typedef struct foundary{
+typedef struct foundry{
     int id;
     int time_interval;
     int capacity;
-}foundary;
+    int waiting_iron_count;
+    int waiting_coal_count;
+    int produced_ignot_count;
+}foundry;
 
 int number_of_miners;
 int number_of_transporters;
@@ -48,17 +53,21 @@ int number_of_foundaries;
 miner *miners;
 transporter *transporters;
 smelter *smelters;
-foundary *foundaries;
+foundry *foundaries;
 
 pthread_t *miner_threads;
 pthread_t *transporter_threads;
 pthread_t *smelter_threads;
-pthread_t *foundary_threads;
+pthread_t *foundry_threads;
 
 sem_t *miner_semaphores;
+sem_t *foundry_semaphores;
+sem_t *waiter_semaphores;
 pthread_mutex_t *miner_locks;
+pthread_mutex_t *foundry_locks;
 
 int miner_iterator=0;
+int all_miners_are_stopped = 0;
 
 void getInput(void){
     scanf("%d",&number_of_miners);
@@ -97,7 +106,7 @@ void getInput(void){
         (smelters+i)->ore_type = temp3;
     }
     scanf("%d",&number_of_foundaries);
-    foundaries = (foundary*)malloc(number_of_foundaries * sizeof(foundary));
+    foundaries = (foundry*)malloc(number_of_foundaries * sizeof(foundry));
     //printf("Number of foundaries = %d \n", number_of_foundaries);
     //fflush(stdout); 
     for(i=0;i<number_of_foundaries;i++){
@@ -105,27 +114,40 @@ void getInput(void){
         (foundaries+i)->id = i+1;
         (foundaries+i)->time_interval = temp1;
         (foundaries+i)->capacity = temp2;
+        (foundaries+i)->waiting_coal_count = 0;
+        (foundaries+i)->waiting_iron_count = 0;
+        (foundaries+i)->produced_ignot_count = 0;
     }
     return;
 }
 
 void createSemaphores(void){
     miner_semaphores = (sem_t*) malloc(number_of_miners * sizeof(sem_t));
+    foundry_semaphores = (sem_t *) malloc(number_of_foundaries*2*sizeof(sem_t));
+    waiter_semaphores = (sem_t *) malloc(number_of_foundaries*sizeof(sem_t));
     miner_locks = (pthread_mutex_t*) malloc(number_of_miners*sizeof(pthread_mutex_t));
+    foundry_locks = (pthread_mutex_t *) malloc(number_of_foundaries*sizeof(pthread_mutex_t));
     int i;
     for(i=0;i<number_of_miners;i++){
-            sem_init(miner_semaphores+i, 0, miners[i].capacity); //semaphore for signaling to miners
+        sem_init(miner_semaphores+i, 0, miners[i].capacity); //semaphore for signaling to miners
     }
     for(i=0;i<number_of_miners;i++){
         pthread_mutex_init(miner_locks+i, NULL);
     }
+    for(i=0;i<number_of_foundaries;i++){
+        pthread_mutex_init(foundry_locks+i, NULL);
+    }
+    for(i=0;i<number_of_foundaries*2;i++){
+        sem_init(foundry_semaphores+i, 0, 0);
+    }
+    
     return;
 
 }
 
 void createThreads(void){
     // Allocate thread arrays to store threadids for each thread.
-    miner_threads = (pthread_t*)malloc(number_of_miners * sizeof(pthread_t));
+    miner_threads = (pthread_t *)malloc(number_of_miners * sizeof(pthread_t));
     //printf("Allocated miner threads.\n");
     //fflush(stdout);
     transporter_threads = (pthread_t*)malloc(number_of_transporters * sizeof(pthread_t));
@@ -134,10 +156,10 @@ void createThreads(void){
     smelter_threads = (pthread_t*)malloc(number_of_smelters * sizeof(pthread_t));
     //printf("Allocated smelter  threads.\n");
     //fflush(stdout);
-    foundary_threads = (pthread_t*)malloc(number_of_foundaries * sizeof(pthread_t));
-    int i;
-    //printf("Allocated foundary threads.\n");
+    foundry_threads = (pthread_t*)malloc(number_of_foundaries * sizeof(pthread_t));
+    //printf("Allocated foundry threads.\n");
     //fflush(stdout);
+    int i;
     for(i=0;i<number_of_miners;i++){
         int *temp = (int*)malloc(sizeof(int*));
         *temp = i;
@@ -154,34 +176,32 @@ void createThreads(void){
         pthread_create(smelter_threads+i, NULL, smelter_thread, NULL);
     }
     for(i=0;i<number_of_foundaries;i++){
-        pthread_create(foundary_threads+i, NULL, foundary_thread, NULL);
+        pthread_create(foundry_threads+i, NULL, foundry_thread, NULL);
     }
     */
     return;
 }
 
-void *miner_thread(void *ID)
-{
-	int id = *(int *)ID;
+void *miner_thread(void *ID){
+	int index = *(int *)ID; // index is the place for miner in the miners array
     free(ID);
-    int mine_limit = miners[id].mine_capacity;
+    miner *temp_miner = miners+index;
+    int mine_limit = temp_miner->mine_capacity;
     MinerInfo miner_info;
-    FillMinerInfo(&miner_info,miners[id].id,miners[id].ore_type,miners[id].capacity,miners[id].ore_count);
+    FillMinerInfo(&miner_info,temp_miner->id,temp_miner->ore_type,temp_miner->capacity,temp_miner->ore_count);
     WriteOutput(&miner_info,NULL,NULL,NULL,MINER_CREATED);
     while(mine_limit--){
-        sem_wait(miner_semaphores+id); // wait for open position for new ore
-        //WriteOutput(&miner_info, NULL, NULL, NULL,MINER_STARTED);
-        pthread_mutex_lock(miner_locks+id);
-        usleep(miners[id].time_interval);
-        (miners[id].ore_count)++;
-        pthread_mutex_unlock(miner_locks+id);
-        FillMinerInfo(&miner_info,miners[id].id,miners[id].ore_type,miners[id].capacity,miners[id].ore_count);
-        //WriteOutput(&miner_info, NULL, NULL, NULL,MINER_FINISHED);
-        usleep(miners[id].time_interval);
-        //printf("Mine created t c %d\n",id);
-        //fflush(stdout);
+        sem_wait(miner_semaphores+index); // wait for open position for new ore
+        WriteOutput(&miner_info, NULL, NULL, NULL,MINER_STARTED);
+        pthread_mutex_lock(miner_locks+index);
+        usleep(temp_miner->time_interval);
+        (temp_miner->ore_count)++;
+        pthread_mutex_unlock(miner_locks+index);
+        FillMinerInfo(&miner_info,temp_miner->id,temp_miner->ore_type,temp_miner->capacity,temp_miner->ore_count);
+        WriteOutput(&miner_info, NULL, NULL, NULL,MINER_FINISHED);
+        usleep(temp_miner->time_interval);
     }
-    FillMinerInfo(&miner_info,miners[id].id,miners[id].ore_type,miners[id].capacity,miners[id].ore_count);
+    FillMinerInfo(&miner_info,temp_miner->id,temp_miner->ore_type,temp_miner->capacity,temp_miner->ore_count);
     WriteOutput(&miner_info, NULL, NULL, NULL,MINER_STOPPED);
     pthread_exit(0);
 }
@@ -191,57 +211,99 @@ void *transporter_thread(void *ID){
     free(ID);
     TransporterInfo transporter_info;
     MinerInfo miner_info;
-    OreType *ore;
-    FillTransporterInfo(&transporter_info,transporters[id].id,NULL);
+    OreType *ore = NULL;
+    FillTransporterInfo(&transporter_info,transporters[id].id,ore);
     WriteOutput(NULL, &transporter_info, NULL, NULL,TRANSPORTER_CREATED);
     while(1){
-        ore = NULL;
-        int target_miner = find_miner();
-        printf("%d \n",target_miner);
-        // Miner routine starts
-        FillMinerInfo(&miner_info, target_miner+1, 0, 0, 0);
-        ore = &(miners[target_miner].ore_type);
-        FillTransporterInfo(&transporter_info,transporters[id].id,NULL);
-        WriteOutput(&miner_info, &transporter_info, NULL, NULL,TRANSPORTER_TRAVEL);
-        pthread_mutex_lock(miner_locks+target_miner);
-        miners[target_miner].ore_count--;
-        pthread_mutex_unlock(miner_locks+target_miner);
-        FillMinerInfo(&miner_info,miners[target_miner].id,miners[target_miner].ore_type,miners[target_miner].capacity,miners[target_miner].ore_count);
-        FillTransporterInfo(&transporter_info,transporters[id].id,ore);
-        //WriteOutput(&miner_info, &transporter_info, NULL, NULL,TRANSPORTER_TAKE_ORE);
-        usleep(transporters[id].time_interval);
-        sem_post(miner_semaphores+target_miner);
+        int target_miner_index = find_miner();
+        if(target_miner_index != -1){ // Miner routine starts
+            miner *target_miner = miners+target_miner_index;
+            FillMinerInfo(&miner_info, target_miner->id, 0, 0, 0);
+            ore = &(miners[target_miner_index].ore_type);
+            FillTransporterInfo(&transporter_info,transporters[id].id,NULL);
+            WriteOutput(&miner_info, &transporter_info, NULL, NULL,TRANSPORTER_TRAVEL);
+            pthread_mutex_lock(miner_locks+target_miner_index);
+            target_miner->ore_count--;
+            pthread_mutex_unlock(miner_locks+target_miner_index);
+            FillMinerInfo(&miner_info,target_miner->id,target_miner->ore_type,target_miner->capacity,target_miner->ore_count);
+            FillTransporterInfo(&transporter_info,transporters[id].id,ore);
+            WriteOutput(&miner_info, &transporter_info, NULL, NULL,TRANSPORTER_TAKE_ORE);
+            usleep(transporters[id].time_interval);
+            sem_post(miner_semaphores+target_miner_index);
+        }
+        else{
+            break;
+        }
     }
     pthread_exit(0);
+}
 
+void *wait_thread(void* inp){
+    int index = *(int *)inp; // index is the place for miner in the foundaries array
+    free(inp);
+    sem_wait(foundry_semaphores+index*2);
+    sem_wait(foundry_semaphores+index*2+1);
+    sem_post(waiter_semaphores+index);
+    pthread_exit(0);
+}
+
+void *foundry_thread(void *ID){
+	int index = *(int *)ID; // index is the place for miner in the foundaries array
+    pthread_t waiter_thread_id;
+    pthread_create(&waiter_thread_id, NULL, wait_thread,(void*) ID);
+    free(ID);
+    int flag = 0;
+    clock_t start, end;
+    struct timespec ts;
+    foundry *temp_foundry = foundaries+index;
+    FoundryInfo foundry_info;
+    TransporterInfo transporter_info;
+    FillFoundryInfo(&foundry_info,temp_foundry->id,temp_foundry->capacity,temp_foundry->waiting_iron_count,temp_foundry->waiting_coal_count,temp_foundry->produced_ignot_count);
+    WriteOutput(NULL, NULL, NULL, &foundry_info,FOUNDRY_CREATED);
+    start = clock();
+    while(1){
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 5;
+        if(sem_timedwait(waiter_semaphores+index, &ts)==-1) break;
+        pthread_mutex_lock(foundry_locks+index);
+        temp_foundry->waiting_iron_count--;
+        temp_foundry->waiting_coal_count--;
+        FillFoundryInfo(&foundry_info,temp_foundry->id,temp_foundry->capacity,temp_foundry->waiting_iron_count,temp_foundry->waiting_coal_count,temp_foundry->produced_ignot_count);
+        WriteOutput(NULL, NULL, NULL, &foundry_info,FOUNDRY_STARTED);
+        usleep(temp_foundry->time_interval);
+        temp_foundry->produced_ignot_count++;
+        FillFoundryInfo(&foundry_info,temp_foundry->id,temp_foundry->capacity,temp_foundry->waiting_iron_count,temp_foundry->waiting_coal_count,temp_foundry->produced_ignot_count);
+        WriteOutput(NULL, NULL, NULL, &foundry_info,FOUNDRY_FINISHED);
+        pthread_mutex_unlock(foundry_locks+index);
+    }
+    FillFoundryInfo(&foundry_info,temp_foundry->id,temp_foundry->capacity,temp_foundry->waiting_iron_count,temp_foundry->waiting_coal_count,temp_foundry->produced_ignot_count);
+    WriteOutput(NULL, NULL, NULL, &foundry_info,FOUNDRY_STOPPED);
+    
 }
 
 int find_miner(void){
     int i;
     pthread_mutex_t* temp;
     int flag = 0;
-    printf("Miner iterator: %d \n",miner_iterator);
-    if(miner_iterator == 1){
-        miner_iterator = -1;
-    }
-    for(i=miner_iterator+1;i<number_of_miners;i++){
+    if(miner_iterator == 2)
+        miner_iterator = 0;
+    for(i=miner_iterator;i<number_of_miners;i++){
+        if(flag >= 2 && all_miners_are_stopped){
+            return -1;
+        }
         temp = miner_locks+miner_iterator;
         pthread_mutex_lock(temp);
         int temp_ore_count = miners[i].ore_count;
-        if(temp_ore_count){
-            miner_iterator = i;
-            flag = 1;
-        }
-        if(i == number_of_miners-1){
-            i = 0;
-        }
-        if(flag){
+        if(temp_ore_count > 0){
             pthread_mutex_unlock(temp);
+            miner_iterator = i+1;
             break;
         }
         pthread_mutex_unlock(temp);
+        if(i == number_of_miners-1)
+            i = -1;
+            flag++;
     }
-    //printf("%d \n",i);
     return i;
 }
 
@@ -250,21 +312,19 @@ void waitThreads(void){
     for(i=0;i<number_of_miners;i++){
         pthread_join(miner_threads[i], NULL);
     }
+    all_miners_are_stopped = 1;
+    for(i=0;i<number_of_transporters;i++){
+        pthread_join(transporter_threads[i], NULL);
+    }
     return;
 }
 
 
 int main(void){
     getInput();
-    //printf("Creating semaphores.\n");
-    //fflush(stdout);
     createSemaphores();
-    //printf("Creating threads.\n");
-    //fflush(stdout);
     InitWriteOutput();
     createThreads();
-    //printf("Created threads\n");
-    //fflush(stdout);
     waitThreads();
     
     return 0;
